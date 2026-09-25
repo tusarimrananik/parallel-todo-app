@@ -264,7 +264,8 @@ export default function ParallelTodoApp() {
       if (Math.abs(e.deltaX) > Math.abs(e.deltaY)) return;
 
       // Check if mouse is hovering over a task list that can scroll vertically
-      const taskList = e.target.closest('[data-task-list="true"]');
+      const el = e.target instanceof Element ? e.target : (e.target?.parentElement || null);
+      const taskList = el?.closest ? el.closest('[data-task-list="true"]') : null;
       if (taskList) {
         const canScrollVertically = taskList.scrollHeight > taskList.clientHeight;
         if (canScrollVertically) {
