@@ -1,10 +1,11 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { 
   Plus, Trash2, CheckCircle2, Circle, ArrowRight, ArrowLeft, 
   Sparkles, Layers, RefreshCw, Edit2, Check, X,
-  Clock, CheckCheck, Palette
+  Clock, CheckCheck, Palette, Database, ChevronUp, ChevronDown,
+  CloudOff
 } from 'lucide-react';
 
 const AVAILABLE_COLORS = [
@@ -107,6 +108,11 @@ export default function ParallelTodoApp() {
   const [mounted, setMounted] = useState(false);
   const [inputs, setInputs] = useState({});
 
+  // DB Sync state
+  const [syncStatus, setSyncStatus] = useState('connecting'); // 'connecting' | 'synced' | 'syncing' | 'local' | 'error'
+  const isInitialLoadedRef = useRef(false);
+  const syncTimeoutRef = useRef(null);
+
   // Lane editing state
   const [editingTitleLaneId, setEditingTitleLaneId] = useState(null);
   const [editingTitleText, setEditingTitleText] = useState('');
@@ -124,43 +130,112 @@ export default function ParallelTodoApp() {
   const lanesContainerRef = useRef(null);
   const newLaneInputRef = useRef(null);
 
-  // Load from localStorage
+  // Load from DB (or fallback to localStorage)
   useEffect(() => {
-    try {
-      const savedTasks = localStorage.getItem('quadtrack_tasks');
-      const savedLanes = localStorage.getItem('quadtrack_lanes');
-      if (savedTasks) {
-        setTasks(JSON.parse(savedTasks));
-      } else {
-        setTasks([
-          { id: '1', laneId: 'lane-1', text: 'Define project architecture & roadmap', done: false, createdAt: Date.now() },
-          { id: '2', laneId: 'lane-2', text: 'Morning workout & hydration', done: true, createdAt: Date.now() - 3600000 },
-          { id: '3', laneId: 'lane-3', text: 'Evaluate LLM parallel reasoning models', done: false, createdAt: Date.now() - 7200000 },
-          { id: '4', laneId: 'lane-4', text: 'Quick deployment check & DNS verify', done: false, createdAt: Date.now() - 1800000 }
-        ]);
-      }
-      if (savedLanes) {
-        const parsedLanes = JSON.parse(savedLanes);
-        if (Array.isArray(parsedLanes) && parsedLanes.length > 0) {
-          setLanes(parsedLanes);
+    async function loadData() {
+      let initialLocalLanes = INITIAL_LANES;
+      let initialLocalTasks = [
+        { id: '1', laneId: 'lane-1', text: 'Define project architecture & roadmap', done: false, createdAt: Date.now() },
+        { id: '2', laneId: 'lane-2', text: 'Morning workout & hydration', done: true, createdAt: Date.now() - 3600000 },
+        { id: '3', laneId: 'lane-3', text: 'Evaluate LLM parallel reasoning models', done: false, createdAt: Date.now() - 7200000 },
+        { id: '4', laneId: 'lane-4', text: 'Quick deployment check & DNS verify', done: false, createdAt: Date.now() - 1800000 }
+      ];
+
+      // Fast read localStorage first
+      try {
+        const savedTasks = localStorage.getItem('quadtrack_tasks');
+        const savedLanes = localStorage.getItem('quadtrack_lanes');
+        if (savedTasks) initialLocalTasks = JSON.parse(savedTasks);
+        if (savedLanes) {
+          const parsed = JSON.parse(savedLanes);
+          if (Array.isArray(parsed) && parsed.length > 0) initialLocalLanes = parsed;
         }
+      } catch (e) {
+        console.error('localStorage load error:', e);
       }
-    } catch (e) {
-      console.error(e);
+
+      // Set immediate local state
+      setLanes(initialLocalLanes);
+      setTasks(initialLocalTasks);
+      setMounted(true);
+
+      // Now query Cloud Database
+      try {
+        const res = await fetch('/api/board');
+        if (res.ok) {
+          const data = await res.json();
+          if (data.dbConnected) {
+            if (Array.isArray(data.lanes) && data.lanes.length > 0) {
+              setLanes(data.lanes);
+              setTasks(Array.isArray(data.tasks) ? data.tasks : []);
+              localStorage.setItem('quadtrack_lanes', JSON.stringify(data.lanes));
+              localStorage.setItem('quadtrack_tasks', JSON.stringify(data.tasks || []));
+            } else {
+              // Empty database: seed with local board
+              await fetch('/api/board', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ lanes: initialLocalLanes, tasks: initialLocalTasks })
+              });
+            }
+            setSyncStatus('synced');
+          } else {
+            setSyncStatus('local');
+          }
+        } else {
+          setSyncStatus('local');
+        }
+      } catch (err) {
+        console.warn('Database connection unavailable, using local storage:', err);
+        setSyncStatus('local');
+      } finally {
+        isInitialLoadedRef.current = true;
+      }
     }
-    setMounted(true);
+
+    loadData();
   }, []);
 
-  // Save to localStorage
-  useEffect(() => {
-    if (!mounted) return;
+  // Save changes to localStorage and push to Database
+  const triggerSync = useCallback((currentLanes, currentTasks) => {
+    if (!isInitialLoadedRef.current) return;
+
+    // Save locally immediately
     try {
-      localStorage.setItem('quadtrack_tasks', JSON.stringify(tasks));
-      localStorage.setItem('quadtrack_lanes', JSON.stringify(lanes));
+      localStorage.setItem('quadtrack_tasks', JSON.stringify(currentTasks));
+      localStorage.setItem('quadtrack_lanes', JSON.stringify(currentLanes));
     } catch (e) {
       console.error(e);
     }
-  }, [tasks, lanes, mounted]);
+
+    // Debounced Cloud Sync
+    if (syncTimeoutRef.current) clearTimeout(syncTimeoutRef.current);
+    setSyncStatus('syncing');
+
+    syncTimeoutRef.current = setTimeout(async () => {
+      try {
+        const res = await fetch('/api/board', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ lanes: currentLanes, tasks: currentTasks })
+        });
+        if (res.ok) {
+          const data = await res.json();
+          setSyncStatus(data.dbConnected ? 'synced' : 'local');
+        } else {
+          setSyncStatus('local');
+        }
+      } catch {
+        setSyncStatus('local');
+      }
+    }, 400);
+  }, []);
+
+  // Watch state changes after initial load
+  useEffect(() => {
+    if (!isInitialLoadedRef.current) return;
+    triggerSync(lanes, tasks);
+  }, [lanes, tasks, triggerSync]);
 
   // Focus add lane input when toggled
   useEffect(() => {
@@ -264,7 +339,31 @@ export default function ParallelTodoApp() {
     setTasks(prev => prev.filter(t => t.id !== id));
   };
 
-  const moveTask = (id, direction) => {
+  // Sort tasks within the lane (move up or down)
+  const moveTaskWithinLane = (taskId, direction) => {
+    const currentTask = tasks.find(t => t.id === taskId);
+    if (!currentTask) return;
+
+    const currentLaneTasks = tasks.filter(t => t.laneId === currentTask.laneId);
+    const taskIndex = currentLaneTasks.findIndex(t => t.id === taskId);
+    const targetIndex = taskIndex + direction;
+
+    if (targetIndex < 0 || targetIndex >= currentLaneTasks.length) return;
+
+    const otherTask = currentLaneTasks[targetIndex];
+
+    const globalIdx1 = tasks.findIndex(t => t.id === currentTask.id);
+    const globalIdx2 = tasks.findIndex(t => t.id === otherTask.id);
+
+    const updatedTasks = [...tasks];
+    updatedTasks[globalIdx1] = otherTask;
+    updatedTasks[globalIdx2] = currentTask;
+
+    setTasks(updatedTasks);
+  };
+
+  // Move task across lanes (left or right)
+  const moveTaskAcrossLanes = (id, direction) => {
     const currentTask = tasks.find(t => t.id === id);
     if (!currentTask) return;
     const currentIndex = lanes.findIndex(l => l.id === currentTask.laneId);
@@ -333,12 +432,35 @@ export default function ParallelTodoApp() {
                   {lanes.length} {lanes.length === 1 ? 'Lane' : 'Parallel Lanes'}
                 </span>
               </div>
-              <p className="text-xs text-slate-400 hidden sm:block">Dynamic multi-stream parallel task board with instant local persistence</p>
+              <p className="text-xs text-slate-400 hidden sm:block">Dynamic multi-stream parallel task board with Neon DB cloud persistence</p>
             </div>
           </div>
 
           {/* Action & Stats Bar */}
-          <div className="flex items-center gap-3">
+          <div className="flex items-center flex-wrap gap-2.5 sm:gap-3">
+            {/* Database Sync Status Badge */}
+            <div className="flex items-center">
+              {syncStatus === 'syncing' ? (
+                <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-amber-500/30 bg-amber-500/10 text-amber-300 text-xs font-medium">
+                  <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                  <span className="hidden sm:inline">Saving to Database...</span>
+                  <span className="sm:hidden">Saving...</span>
+                </div>
+              ) : syncStatus === 'synced' ? (
+                <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-emerald-500/30 bg-emerald-500/10 text-emerald-400 text-xs font-medium">
+                  <Database className="w-3.5 h-3.5 text-emerald-400" />
+                  <span className="hidden sm:inline">Cloud DB Synced</span>
+                  <span className="sm:hidden">DB Active</span>
+                </div>
+              ) : (
+                <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-slate-700/50 bg-slate-800/60 text-slate-400 text-xs font-medium">
+                  <CloudOff className="w-3.5 h-3.5" />
+                  <span className="hidden sm:inline">Local Storage</span>
+                  <span className="sm:hidden">Local</span>
+                </div>
+              )}
+            </div>
+
             <button
               onClick={() => setIsAddingLane(true)}
               className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold shadow-md shadow-indigo-600/20 transition active:scale-95"
@@ -530,7 +652,7 @@ export default function ParallelTodoApp() {
                       <span className="text-[11px] text-slate-600">Type above or press Enter to add</span>
                     </div>
                   ) : (
-                    laneTasks.map((task) => (
+                    laneTasks.map((task, taskIdx) => (
                       <div
                         key={task.id}
                         className={`group relative rounded-xl border p-3 transition-all duration-150 ${
@@ -581,22 +703,43 @@ export default function ParallelTodoApp() {
                               {task.text}
                             </span>
 
-                            {/* Actions on hover */}
-                            <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+                            {/* Actions on hover/mobile */}
+                            <div className="flex items-center gap-0.5 opacity-90 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity">
+                              {/* Reorder up/down within lane */}
+                              {taskIdx > 0 && (
+                                <button
+                                  onClick={() => moveTaskWithinLane(task.id, -1)}
+                                  title="Move task up"
+                                  className="p-1 text-slate-400 hover:text-white rounded hover:bg-slate-800 transition"
+                                >
+                                  <ChevronUp className="w-3.5 h-3.5" />
+                                </button>
+                              )}
+                              {taskIdx < laneTasks.length - 1 && (
+                                <button
+                                  onClick={() => moveTaskWithinLane(task.id, 1)}
+                                  title="Move task down"
+                                  className="p-1 text-slate-400 hover:text-white rounded hover:bg-slate-800 transition"
+                                >
+                                  <ChevronDown className="w-3.5 h-3.5" />
+                                </button>
+                              )}
+
+                              {/* Cross-lane left/right */}
                               {idx > 0 && (
                                 <button
-                                  onClick={() => moveTask(task.id, -1)}
+                                  onClick={() => moveTaskAcrossLanes(task.id, -1)}
                                   title={`Move to ${lanes[idx - 1]?.title || 'left lane'}`}
-                                  className="p-1 text-slate-400 hover:text-white rounded hover:bg-slate-800"
+                                  className="p-1 text-slate-400 hover:text-white rounded hover:bg-slate-800 transition"
                                 >
                                   <ArrowLeft className="w-3.5 h-3.5" />
                                 </button>
                               )}
                               {idx < lanes.length - 1 && (
                                 <button
-                                  onClick={() => moveTask(task.id, 1)}
+                                  onClick={() => moveTaskAcrossLanes(task.id, 1)}
                                   title={`Move to ${lanes[idx + 1]?.title || 'right lane'}`}
-                                  className="p-1 text-slate-400 hover:text-white rounded hover:bg-slate-800"
+                                  className="p-1 text-slate-400 hover:text-white rounded hover:bg-slate-800 transition"
                                 >
                                   <ArrowRight className="w-3.5 h-3.5" />
                                 </button>
@@ -604,14 +747,14 @@ export default function ParallelTodoApp() {
                               <button
                                 onClick={() => startEditTask(task)}
                                 title="Edit task"
-                                className="p-1 text-slate-400 hover:text-white rounded hover:bg-slate-800"
+                                className="p-1 text-slate-400 hover:text-white rounded hover:bg-slate-800 transition"
                               >
                                 <Edit2 className="w-3.5 h-3.5" />
                               </button>
                               <button
                                 onClick={() => deleteTask(task.id)}
                                 title="Delete task"
-                                className="p-1 text-slate-400 hover:text-rose-400 rounded hover:bg-slate-800"
+                                className="p-1 text-slate-400 hover:text-rose-400 rounded hover:bg-slate-800 transition"
                               >
                                 <Trash2 className="w-3.5 h-3.5" />
                               </button>
