@@ -1,8 +1,8 @@
 import './globals.css';
 
 export const metadata = {
-  title: 'QuadTrack — 4 Parallel Task Boards',
-  description: 'Manage 4 parallel to-do workflows seamlessly with real-time local storage.',
+  title: 'QuadTrack — Parallel Multi-Lane Task Board',
+  description: 'Manage multiple parallel to-do workflows seamlessly with real-time local storage.',
 };
 
 export default function RootLayout({ children }) {
