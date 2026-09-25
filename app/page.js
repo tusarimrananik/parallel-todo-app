@@ -254,6 +254,37 @@ export default function ParallelTodoApp() {
     }
   }, [isAddingLane]);
 
+  // Translate vertical wheel scroll to horizontal scrolling when outside scrollable task lists
+  useEffect(() => {
+    const handleWheel = (e) => {
+      const container = lanesContainerRef.current;
+      if (!container) return;
+
+      // Allow native horizontal swipe (e.g. on laptop trackpad)
+      if (Math.abs(e.deltaX) > Math.abs(e.deltaY)) return;
+
+      // Check if mouse is hovering over a task list that can scroll vertically
+      const taskList = e.target.closest('[data-task-list="true"]');
+      if (taskList) {
+        const canScrollVertically = taskList.scrollHeight > taskList.clientHeight;
+        if (canScrollVertically) {
+          // Let vertical scrolling continue inside the lane's task list
+          return;
+        }
+      }
+
+      // Outside the lane, on headers/margins, or over a non-overflowing lane: scroll board horizontally
+      if (container.scrollWidth > container.clientWidth) {
+        e.preventDefault();
+        const delta = e.deltaMode === 1 ? e.deltaY * 33 : (e.deltaMode === 2 ? e.deltaY * container.clientWidth : e.deltaY);
+        container.scrollLeft += delta;
+      }
+    };
+
+    window.addEventListener('wheel', handleWheel, { passive: false });
+    return () => window.removeEventListener('wheel', handleWheel);
+  }, []);
+
   // Add a new lane
   const createLane = () => {
     const title = newLaneTitle.trim();
@@ -514,6 +545,7 @@ export default function ParallelTodoApp() {
             return (
               <div 
                 key={lane.id}
+                data-lane-card="true"
                 className="w-[320px] sm:w-[350px] shrink-0 flex flex-col bg-[#111726] border border-slate-800/80 rounded-2xl overflow-hidden shadow-xl shadow-black/40 transition-all duration-200 hover:border-slate-700/80"
               >
                 {/* Lane Header */}
@@ -644,7 +676,10 @@ export default function ParallelTodoApp() {
                 </div>
 
                 {/* Task List */}
-                <div className="flex-1 p-3 overflow-y-auto space-y-2.5 max-h-[calc(100vh-270px)] min-h-[320px]">
+                <div 
+                  data-task-list="true"
+                  className="flex-1 p-3 overflow-y-auto space-y-2.5 max-h-[calc(100vh-270px)] min-h-[320px]"
+                >
                   {laneTasks.length === 0 ? (
                     <div className="h-44 border-2 border-dashed border-slate-800/80 rounded-xl flex flex-col items-center justify-center text-slate-500 text-xs gap-1.5 p-4 text-center">
                       <Sparkles className="w-5 h-5 text-slate-600 mb-1" />
